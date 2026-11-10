@@ -1,47 +1,16 @@
-/*
- * ფოტოს გადაღება + GPS კოორდინატების (განედი/გრძედი) ჩაწერა EXIF-ში
- *
- * ========== 1) app/build.gradle(.kts) - dependencies ==========
- * implementation("com.google.android.gms:play-services-location:21.3.0")
- * implementation("androidx.exifinterface:exifinterface:1.3.7")
- * implementation("androidx.activity:activity-compose:1.9.0")
- * (Compose-ის დანარჩენი სტანდარტული დამოკიდებულებები Android Studio-ს
- *  "Empty Activity" შაბლონში უკვე არის)
- *
- * ========== 2) AndroidManifest.xml ==========
- * <uses-permission android:name="android.permission.CAMERA" />
- * <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
- * <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
- *
- * <application ...>
- *     <provider
- *         android:name="androidx.core.content.FileProvider"
- *         android:authorities="${applicationId}.fileprovider"
- *         android:exported="false"
- *         android:grantUriPermissions="true">
- *         <meta-data
- *             android:name="android.support.FILE_PROVIDER_PATHS"
- *             android:resource="@xml/file_paths" />
- *     </provider>
- * </application>
- *
- * ========== 3) res/xml/file_paths.xml (შექმენი ახალი ფაილი) ==========
- * <?xml version="1.0" encoding="utf-8"?>
- * <paths>
- *     <files-path name="photos" path="photos/" />
- * </paths>
- *
- * ========== 4) ქვემოთ მოცემული კოდი - MainActivity.kt ==========
- * (შეცვალე package სახელი შენი პროექტის package-ით)
- */
 package com.example.geophoto
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.content.ContentValues
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.provider.MediaStore
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -69,6 +38,32 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+/** ფოტოს კოპირება გალერეაში (Pictures/GeoPhoto). EXIF კოორდინატები ინახება. */
+fun saveToGallery(context: Context, file: File): Boolean {
+    val values = ContentValues().apply {
+        put(MediaStore.Images.Media.DISPLAY_NAME, file.name)
+        put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+        if (Build.VERSION.SDK_INT >= 29) {
+            put(
+                MediaStore.Images.Media.RELATIVE_PATH,
+                "${Environment.DIRECTORY_PICTURES}/GeoPhoto"
+            )
+            put(MediaStore.Images.Media.IS_PENDING, 1)
+        }
+    }
+    val resolver = context.contentResolver
+    val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+        ?: return false
+    val out = resolver.openOutputStream(uri) ?: return false
+    out.use { o -> file.inputStream().use { it.copyTo(o) } }
+    if (Build.VERSION.SDK_INT >= 29) {
+        values.clear()
+        values.put(MediaStore.Images.Media.IS_PENDING, 0)
+        resolver.update(uri, values, null, null)
+    }
+    return true
+}
+
 @SuppressLint("MissingPermission")
 @Composable
 fun GeoPhotoScreen() {
@@ -80,7 +75,6 @@ fun GeoPhotoScreen() {
     var bitmap by remember { mutableStateOf<Bitmap?>(null) }
     var info by remember { mutableStateOf("ფოტო ჯერ არ არის გადაღებული") }
 
-    // ფოტოს გადაღების შემდეგ: ვიღებთ ლოკაციას და ვწერთ EXIF-ში
     val takePicture = rememberLauncherForActivityResult(
         ActivityResultContracts.TakePicture()
     ) { success ->
@@ -95,15 +89,17 @@ fun GeoPhotoScreen() {
             CancellationTokenSource().token
         ).addOnSuccessListener { loc ->
             if (loc != null) {
-                // კოორდინატების ჩაწერა თვით JPEG ფაილში
                 val exif = ExifInterface(file.absolutePath)
                 exif.setLatLong(loc.latitude, loc.longitude)
                 if (loc.hasAltitude()) exif.setAltitude(loc.altitude)
                 exif.saveAttributes()
 
+                val saved = saveToGallery(context, file)
                 bitmap = BitmapFactory.decodeFile(file.absolutePath)
                 info = "განედი (lat): ${loc.latitude}\nგრძედი (lng): ${loc.longitude}\n" +
-                        "სიზუსტე: ${loc.accuracy} მ\nფაილი: ${file.name}"
+                        "სიზუსტე: ${loc.accuracy} მ\n" +
+                        if (saved) "✅ შენახულია გალერეაში: Pictures/GeoPhoto"
+                        else "⚠️ გალერეაში შენახვა ვერ მოხერხდა"
             } else {
                 info = "ლოკაცია ვერ მოიძებნა (ჩართე GPS)"
             }
@@ -121,7 +117,6 @@ fun GeoPhotoScreen() {
         takePicture.launch(uri)
     }
 
-    // ნებართვების მოთხოვნა
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { result ->
